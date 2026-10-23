@@ -1,303 +1,358 @@
-/* Bridgewater Site Visibility Calendar */
+/* =====================================================================
+   Bridgewater PTC – Site Visibility Calendar
+   ---------------------------------------------------------------------
+   SETTINGS: paste your Supabase values below (Project Settings > API).
+   Leave them blank to run in DEMO mode (passkey: demo, data on this
+   device only). See README.md for the database setup.
+   ===================================================================== */
+const SETTINGS = {
+  SUPABASE_URL: "",        // e.g. "https://abcdxyz.supabase.co"
+  SUPABASE_ANON_KEY: "",   // the "anon public" key (never the service_role key)
+  REFRESH_SECONDS: 60      // how often the TV pulls new data
+};
+
 (() => {
-  const REFRESH_MS = 60 * 1000;
+  "use strict";
+
+  const CFG = SETTINGS;
+  const DEMO = !CFG.SUPABASE_URL || !CFG.SUPABASE_ANON_KEY;
   const TYPES = {
-    event: { label: "EVENT", plural: "Events", icon: "★" },
-    contractor: { label: "CONTRACTOR", plural: "Contractors Onsite", icon: "⚒" },
-    pto: { label: "PTO / OOO", plural: "PTO / OOO", icon: "✈" },
+    event:      { label: "EVENT",      add: "ADD EVENT" },
+    contractor: { label: "CONTRACTOR", add: "ADD CONTRACTOR" },
+    pto:        { label: "PTO / OOO",  add: "ADD PTO / OOO" }
   };
-  const DOW = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
+  const WD = ["MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"];
+  const WD_LONG = ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY"];
 
-  const state = { entries: [], view: "month", cursor: today(), filter: "all", lastSync: null, summaryOpen: false };
-  let todayKey = key(today());
+  const state = { view: "month", filter: "all", focus: today(), entries: [] };
 
-  const $ = (s) => document.querySelector(s);
-  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-
-  /* ---------- Dates (local, no UTC drift) ---------- */
+  // ---------- Date helpers ----------
+  const pad = n => String(n).padStart(2, "0");
   function today() { const d = new Date(); return new Date(d.getFullYear(), d.getMonth(), d.getDate()); }
-  function key(d) { return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`; }
-  function parse(k) { const [y, m, d] = k.split("-").map(Number); return new Date(y, m - 1, d); }
-  function addDays(d, n) { const x = new Date(d); x.setDate(x.getDate() + n); return x; }
-  function mondayOf(d) { return addDays(d, -((d.getDay() + 6) % 7)); }
-  function fmtTime(t) {
+  const ymd = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const parse = s => { const [y, m, d] = s.split("-").map(Number); return new Date(y, m - 1, d); };
+  const addDays = (d, n) => { const x = new Date(d); x.setDate(x.getDate() + n); return x; };
+  const mondayOf = d => addDays(d, -((d.getDay() + 6) % 7));
+  const sameDay = (a, b) => ymd(a) === ymd(b);
+  const fmtTime = t => {
     if (!t) return "";
-    let [h, m] = t.split(":").map(Number);
-    const ap = h >= 12 ? "PM" : "AM"; h = h % 12 || 12;
-    return `${h}:${String(m).padStart(2, "0")} ${ap}`;
-  }
-  function shortTime(t) {
-    let [h, m] = t.split(":").map(Number);
-    const ap = h >= 12 ? "p" : "a"; h = h % 12 || 12;
-    return m ? `${h}:${String(m).padStart(2, "0")}${ap}` : `${h}${ap}`;
-  }
-  function timeRange(e) {
-    if (e.allDay || !e.startTime) return "All day";
-    return e.endTime ? `${fmtTime(e.startTime)} – ${fmtTime(e.endTime)}` : fmtTime(e.startTime);
-  }
-  function fmtDate(k, opts = { weekday: "short", month: "short", day: "numeric" }) { return parse(k).toLocaleDateString(undefined, opts); }
-  function dateRange(e) { return e.startDate === e.endDate ? fmtDate(e.startDate) : `${fmtDate(e.startDate)} – ${fmtDate(e.endDate)}`; }
+    const [h, m] = t.split(":").map(Number);
+    return `${h % 12 || 12}:${pad(m)} ${h >= 12 ? "PM" : "AM"}`;
+  };
+  const fmtShort = d => d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+  const fmtLong = d => d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+  const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 
-  /* ---------- API ---------- */
-  async function api(path, opts = {}) {
-    const res = await fetch(path, { credentials: "same-origin", headers: { "Content-Type": "application/json" }, ...opts });
-    const data = await res.json().catch(() => ({}));
-    if (res.status === 401 && path !== "/api/login") { showAccess(); throw new Error("Session expired"); }
-    if (!res.ok) throw new Error(data.error || "Something went wrong");
-    return data;
+  const isAllDay = e => e.all_day || !e.start_time;
+  function timeText(e) {
+    if (isAllDay(e)) return "All day";
+    return e.end_time ? `${fmtTime(e.start_time)} – ${fmtTime(e.end_time)}` : fmtTime(e.start_time);
   }
-  async function load(silent) {
+  function dateRangeText(e) {
+    const s = parse(e.start_date), en = parse(e.end_date);
+    return e.start_date === e.end_date ? fmtLong(s) : `${fmtShort(s)} – ${fmtShort(en)}, ${en.getFullYear()}`;
+  }
+  const displayTitle = e => (e.type === "pto" ? `${e.title} OOO` : e.title);
+
+  // ---------- Data API ----------
+  const API = {
+    all() { try { return JSON.parse(localStorage.getItem("bvc_demo_entries")) || []; } catch { return []; } },
+    set(list) { localStorage.setItem("bvc_demo_entries", JSON.stringify(list)); },
+    async list(from, to) { return this.all().filter(e => e.start_date <= to && e.end_date >= from); },
+    async save(entry) { const all=this.all(); if(entry.id){const i=all.findIndex(x=>x.id===entry.id); if(i>=0) all[i]=entry;} else {entry.id=crypto.randomUUID?crypto.randomUUID():String(Date.now()); all.push(entry);} this.set(all); return entry; },
+    async remove(id) { this.set(this.all().filter(x => x.id !== id)); }
+  };
+  // ---------- DOM ----------
+  const $ = id => document.getElementById(id);
+  const els = { app: $("app"), cal: $("calendar"), period: $("periodLabel"), modal: $("modal"), modalCard: $("modalCard"), todayBox: $("todayBox"), todayBody: $("todayBody"), todayCounts: $("todayCounts"), status: $("status") };
+  function handleError() { els.status.textContent = "Could not load calendar data."; }
+  let refreshTimer = null;
+  function boot() { els.app.classList.remove("hidden"); if(localStorage.getItem("bvc_today_open")==="1") els.todayBox.classList.add("open"); tickClock(); render(); load(); clearInterval(refreshTimer); refreshTimer=setInterval(()=>{if(els.modal.classList.contains("hidden")) load();},(CFG.REFRESH_SECONDS||60)*1000); }
+  // ---------- Clock ----------
+  let lastDay = ymd(today());
+  function tickClock() {
+    const n = new Date();
+    $("nowDate").textContent = n.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric", year: "numeric" });
+    $("nowTime").textContent = n.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" });
+    if (ymd(today()) !== lastDay) { // midnight rollover keeps the TV current
+      if (sameDay(state.focus, parse(lastDay))) state.focus = today();
+      lastDay = ymd(today()); render(); load();
+    }
+  }
+  setInterval(tickClock, 15000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) load(); });
+
+  // ---------- Loading ----------
+  function visibleRange() {
+    const f = state.focus;
+    if (state.view === "month") { const s = mondayOf(new Date(f.getFullYear(), f.getMonth(), 1)); return [s, addDays(s, 41)]; }
+    if (state.view === "week") { const s = mondayOf(f); return [s, addDays(s, 6)]; }
+    return [f, f];
+  }
+  async function load() {
+    const [s, e] = visibleRange(), t = today();
+    const from = ymd(s < t ? s : t), to = ymd(e > t ? e : t); // always include today for the summary
     try {
-      const { entries } = await api("/api/entries");
-      state.entries = entries;
-      state.lastSync = new Date();
+      state.entries = (await API.list(from, to)) || [];
+      els.status.textContent = `Updated ${new Date().toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}`;
       render();
-    } catch (e) { if (!silent) toast(e.message); }
+    } catch (err) { handleError(err); }
   }
 
-  /* ---------- Access ---------- */
-  function showAccess() { $("#app").classList.add("hidden"); $("#access").classList.remove("hidden"); setTimeout(() => $("#passkey").focus(), 50); }
-  function showApp() { $("#access").classList.add("hidden"); $("#app").classList.remove("hidden"); load(); }
-  $("#accessForm").addEventListener("submit", async (ev) => {
-    ev.preventDefault();
-    $("#accessError").textContent = "";
-    const btn = ev.target.querySelector("button"); btn.disabled = true; btn.textContent = "Checking…";
-    try {
-      await api("/api/login", { method: "POST", body: JSON.stringify({ passkey: $("#passkey").value }) });
-      $("#passkey").value = "";
-      showApp();
-    } catch (e) { $("#accessError").textContent = e.message; }
-    btn.disabled = false; btn.textContent = "Enter";
-  });
-
-  /* ---------- Data helpers ---------- */
-  function visible() { return state.entries.filter((e) => state.filter === "all" || e.type === state.filter); }
-  function sortEntries(list) {
-    const order = { pto: 0, contractor: 1, event: 2 };
-    return [...list].sort((a, b) => {
-      const ad = a.allDay ? 0 : 1, bd = b.allDay ? 0 : 1;
-      if (ad !== bd) return ad - bd;
-      if (!a.allDay && a.startTime !== b.startTime) return a.startTime < b.startTime ? -1 : 1;
-      if (order[a.type] !== order[b.type]) return order[a.type] - order[b.type];
-      return a.title.localeCompare(b.title);
-    });
+  // ---------- Filtering ----------
+  function entriesOn(day) {
+    const key = ymd(day);
+    return state.entries
+      .filter(e => e.start_date <= key && e.end_date >= key)
+      .filter(e => state.filter === "all" || e.type === state.filter)
+      .sort((a, b) => {
+        const ad = isAllDay(a), bd = isAllDay(b);
+        if (ad !== bd) return ad ? -1 : 1;
+        return (a.start_time || "").localeCompare(b.start_time || "") || a.title.localeCompare(b.title);
+      });
   }
-  function on(k, list = visible()) { return sortEntries(list.filter((e) => e.startDate <= k && e.endDate >= k)); }
 
-  /* ---------- Rendering ---------- */
-  function pill(e) {
-    const tm = e.allDay || !e.startTime ? (e.type === "pto" ? "OOO" : "All day") : (e.endTime ? `${shortTime(e.startTime)}–${shortTime(e.endTime)}` : shortTime(e.startTime));
-    return `<div class="pill ${e.type}" data-id="${e.id}"><span class="t">${esc(e.title)}</span>${tm ? `<span class="tm">${esc(tm)}</span>` : ""}</div>`;
+  // ---------- Render ----------
+  function render() {
+    renderToday();
+    if (state.view === "month") renderMonth();
+    else if (state.view === "week") renderWeek();
+    else renderDay();
   }
-  function card(e, big) {
-    const meta = [];
-    if (e.type === "contractor" && e.purpose) meta.push(esc(e.purpose));
-    if (e.location) meta.push("Location: " + esc(e.location));
-    if (e.owner) meta.push((e.type === "contractor" ? "Host: " : "Owner: ") + esc(e.owner));
-    if (e.startDate !== e.endDate) meta.push("Dates: " + esc(dateRange(e)));
-    return `<div class="card ${e.type}" data-id="${e.id}">
+
+  function pillHTML(e) {
+    const t = e.type === "pto" || isAllDay(e) ? "" : `<span class="t">${esc(timeText(e))}</span>`;
+    return `<button class="pill ${e.type}" data-id="${e.id}" title="${esc(displayTitle(e))}">${esc(displayTitle(e))}${t}</button>`;
+  }
+  function cardHTML(e) {
+    const meta = [esc(timeText(e))];
+    if (e.start_date !== e.end_date) meta.push(`${fmtShort(parse(e.start_date))} – ${fmtShort(parse(e.end_date))}`);
+    if (e.location) meta.push(esc(e.location));
+    return `<button class="card ${e.type}" data-id="${e.id}">
       <span class="ctype">${TYPES[e.type].label}</span>
-      <span class="ct">${esc(e.title)}</span>
-      <span class="${big ? "ctime" : "cm"}">${esc(timeRange(e))}</span>
-      ${meta.map((m) => `<span class="cm">${m}</span>`).join("")}
-    </div>`;
+      <span class="ctitle">${esc(displayTitle(e))}</span>
+      ${e.type === "contractor" && e.purpose ? `<span class="cmeta">${esc(e.purpose)}</span>` : ""}
+      <span class="cmeta">${meta.join(" · ")}</span>
+    </button>`;
   }
 
   function renderMonth() {
-    const c = state.cursor, first = new Date(c.getFullYear(), c.getMonth(), 1);
+    const f = state.focus, month = f.getMonth();
+    const first = new Date(f.getFullYear(), month, 1);
     const start = mondayOf(first);
-    const last = new Date(c.getFullYear(), c.getMonth() + 1, 0);
-    const weeks = Math.ceil(((last - start) / 864e5 + 1) / 7);
-    const list = visible();
-    $("#rangeLabel").textContent = first.toLocaleDateString(undefined, { month: "long", year: "numeric" });
-    const maxShow = weeks > 5 ? 3 : 4;
+    const last = new Date(f.getFullYear(), month + 1, 0);
+    const weeks = Math.ceil((((first.getDay() + 6) % 7) + last.getDate()) / 7);
+    els.period.textContent = f.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+    const maxPills = weeks > 5 ? 3 : 4;
     let cells = "";
     for (let i = 0; i < weeks * 7; i++) {
-      const d = addDays(start, i), k = key(d), items = on(k, list);
-      const cls = ["day-cell", d.getMonth() !== c.getMonth() && "other", k === todayKey && "today", i % 7 >= 5 && "weekend"].filter(Boolean).join(" ");
-      const shown = items.slice(0, maxShow).map(pill).join("");
-      const more = items.length > maxShow ? `<div class="more">+${items.length - maxShow} more</div>` : "";
-      cells += `<div class="${cls}" data-day="${k}"><div class="num"><span>${d.getDate()}</span>${k === todayKey ? '<em class="today-tag">TODAY</em>' : ""}</div>${shown}${more}</div>`;
+      const d = addDays(start, i), list = entriesOn(d);
+      const cls = ["cell", d.getMonth() !== month ? "out" : "", sameDay(d, today()) ? "today" : "", i % 7 >= 5 ? "weekend" : ""].join(" ");
+      const shown = list.slice(0, maxPills).map(pillHTML).join("");
+      const more = list.length > maxPills ? `<button class="more" data-day="${ymd(d)}">+${list.length - maxPills} more</button>` : "";
+      cells += `<div class="${cls}">
+        <button class="daynum" data-day="${ymd(d)}"><span class="dn">${d.getDate()}</span><span class="wd">${WD_LONG[i % 7]}</span></button>
+        <div class="pills">${shown}${more}</div></div>`;
     }
-    $("#calendar").innerHTML = `<div class="month-scroll"><div class="month">
-      <div class="month-head">${DOW.map((d) => `<div>${d.slice(0, 3)}</div>`).join("")}</div>
-      <div class="month-grid" style="grid-template-rows:repeat(${weeks},1fr)">${cells}</div></div></div>`;
+    els.cal.innerHTML = `<div class="dow-row">${WD.map(w => `<div>${w}</div>`).join("")}</div>
+      <div class="month-grid" style="grid-template-rows: repeat(${weeks}, 1fr)">${cells}</div>`;
   }
 
   function renderWeek() {
-    const start = mondayOf(state.cursor), end = addDays(start, 6), list = visible();
-    const sameMonth = start.getMonth() === end.getMonth();
-    const mo = (d) => d.toLocaleDateString(undefined, { month: "short" });
-    $("#rangeLabel").textContent = sameMonth ? `${mo(start)} ${start.getDate()} – ${end.getDate()}, ${end.getFullYear()}` : `${mo(start)} ${start.getDate()} – ${mo(end)} ${end.getDate()}, ${end.getFullYear()}`;
+    const s = mondayOf(state.focus), e = addDays(s, 6);
+    els.period.textContent = `${fmtShort(s)} – ${fmtShort(e)}, ${e.getFullYear()}`;
     let cols = "";
     for (let i = 0; i < 7; i++) {
-      const d = addDays(start, i), k = key(d), items = on(k, list);
-      cols += `<div class="week-col ${k === todayKey ? "today" : ""}">
-        <div class="week-col-head" data-day="${k}"><div class="wd">${DOW[i]}${k === todayKey ? " · TODAY" : ""}</div><div class="wn">${d.toLocaleDateString(undefined, { month: "short", day: "numeric" })}</div></div>
-        <div class="week-col-body">${items.length ? items.map((e) => card(e)).join("") : '<div class="empty">Nothing scheduled</div>'}</div></div>`;
+      const d = addDays(s, i), list = entriesOn(d);
+      cols += `<div class="wcol ${sameDay(d, today()) ? "today" : ""}">
+        <div class="whead" data-day="${ymd(d)}"><div class="wd">${WD_LONG[i]}</div><div class="dn">${d.getDate()}</div></div>
+        <div class="wbody">${list.map(cardHTML).join("") || '<div class="empty">—</div>'}</div></div>`;
     }
-    $("#calendar").innerHTML = `<div class="week">${cols}</div>`;
+    els.cal.innerHTML = `<div class="week-grid">${cols}</div>`;
   }
 
   function renderDay() {
-    const k = key(state.cursor), items = on(k);
-    $("#rangeLabel").textContent = state.cursor.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" }) + (k === todayKey ? " · Today" : "");
-    if (!items.length) { $("#calendar").innerHTML = `<div class="day-empty">Nothing scheduled for this day.</div>`; return; }
-    const allDay = items.filter((e) => e.allDay), timed = items.filter((e) => !e.allDay);
-    const sec = (title, arr) => arr.length ? `<div class="day-section"><h3>${title}</h3><div class="day-cards">${arr.map((e) => card(e, true)).join("")}</div></div>` : "";
-    $("#calendar").innerHTML = `<div class="day">${sec("ALL DAY", allDay)}${sec("SCHEDULED", timed)}</div>`;
+    const d = state.focus, list = entriesOn(d);
+    els.period.textContent = d.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
+    const allDay = list.filter(isAllDay), timed = list.filter(e => !isAllDay(e));
+    els.cal.innerHTML = `<div class="day-wrap">
+      <div class="day-head"><span class="big">${d.toLocaleDateString(undefined, { weekday: "long" })}</span>
+        ${sameDay(d, today()) ? '<span class="tag">TODAY</span>' : ""}</div>
+      <div class="day-section"><h3>ALL DAY</h3><div class="day-cards">${allDay.map(cardHTML).join("") || '<div class="empty">Nothing all-day</div>'}</div></div>
+      <div class="day-section"><h3>SCHEDULE</h3><div class="day-cards">${timed.map(cardHTML).join("") || '<div class="empty">No timed activities</div>'}</div></div>
+    </div>`;
   }
 
-  function renderSummary() {
-    const items = on(todayKey, state.entries);
-    const by = (t) => items.filter((e) => e.type === t);
-    $("#summaryCounts").innerHTML = ["event", "contractor", "pto"].map((t) =>
-      `<span><span class="dot ${t}"></span> <b>${by(t).length}</b> ${TYPES[t].plural}</span>`).join("");
-    $("#summaryBody").innerHTML = ["event", "contractor", "pto"].map((t) => `
-      <div class="summary-col ${t}"><h4 style="color:var(--c)">${TYPES[t].plural.toUpperCase()}</h4>
-      <ul>${by(t).map((e) => `<li class="${t}" data-id="${e.id}">${esc(e.title)} <span class="muted">· ${esc(timeRange(e))}</span></li>`).join("") || '<li class="empty" style="background:none">None today</li>'}</ul></div>`).join("");
+  function renderToday() {
+    const list = entriesOn(today());
+    const by = t => list.filter(e => e.type === t);
+    els.todayCounts.innerHTML = `
+      <span class="c"><span class="dot event"></span>${by("event").length} Events</span>
+      <span class="c"><span class="dot contractor"></span>${by("contractor").length} Contractors onsite</span>
+      <span class="c"><span class="dot pto"></span>${by("pto").length} PTO / OOO</span>`;
+    const col = (t, h) => `<div class="today-col"><h4 style="color:var(--${t})">${h}</h4><ul>${
+      by(t).map(e => `<li data-id="${e.id}">${esc(e.title)}${e.type !== "pto" && !isAllDay(e) ? ` <span class="muted">· ${fmtTime(e.start_time)}</span>` : ""}</li>`).join("") || '<li class="none">None</li>'
+    }</ul></div>`;
+    els.todayBody.innerHTML = col("event", "EVENTS TODAY") + col("contractor", "CONTRACTORS ONSITE") + col("pto", "PTO / OOO TODAY");
   }
 
-  function renderHeader() {
-    const t = new Date();
-    $("#hdrDay").textContent = t.toLocaleDateString(undefined, { weekday: "long" });
-    $("#hdrDate").textContent = t.toLocaleDateString(undefined, { month: "long", day: "numeric", year: "numeric" });
-    $("#syncNote").textContent = state.lastSync ? `Last updated ${state.lastSync.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })} · refreshes automatically` : "";
-  }
-
-  function render() {
-    renderHeader();
-    ({ month: renderMonth, week: renderWeek, day: renderDay })[state.view]();
-    renderSummary();
-    document.querySelectorAll("#viewSeg button").forEach((b) => b.classList.toggle("active", b.dataset.view === state.view));
-    document.querySelectorAll("#filterSeg button").forEach((b) => b.classList.toggle("active", b.dataset.filter === state.filter));
-  }
-
-  /* ---------- Modal ---------- */
-  function openModal(html) { $("#modalCard").innerHTML = html; $("#modal").classList.remove("hidden"); }
-  function closeModal() { $("#modal").classList.add("hidden"); $("#modalCard").innerHTML = ""; }
-  $("#modal").addEventListener("click", (e) => { if (e.target.id === "modal") closeModal(); });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") closeModal(); });
-  const head = (title, sub = "") => `<div class="modal-head"><div>${sub}<h2>${title}</h2></div><button class="close" data-act="close" aria-label="Close">✕</button></div>`;
-
-  function openChooser() {
-    openModal(head("What would you like to add?") + `<div class="choices">
-      <button class="choice event" data-add="event"><span class="ic">${TYPES.event.icon}</span><span>ADD EVENT<small>Site events, training, tours, demos</small></span></button>
-      <button class="choice contractor" data-add="contractor"><span class="ic">${TYPES.contractor.icon}</span><span>ADD CONTRACTOR<small>Vendors, service techs, project work</small></span></button>
-      <button class="choice pto" data-add="pto"><span class="ic">${TYPES.pto.icon}</span><span>ADD PTO / OOO<small>Team out-of-office visibility</small></span></button>
-    </div>`);
-  }
-
-  function field(name, label, val = "", type = "text", full = false, extra = "") {
-    return `<div class="field ${full ? "full" : ""}"><label for="f_${name}">${label}</label><input id="f_${name}" name="${name}" type="${type}" value="${esc(val)}" ${extra}/></div>`;
-  }
-  function openForm(type, e = null) {
-    const d = e || { startDate: key(state.view === "month" ? today() : state.cursor), allDay: type === "pto" };
-    if (!e && state.view !== "month") d.startDate = key(state.cursor);
-    d.endDate = d.endDate || d.startDate;
-    const titleLbl = { event: "Event title *", contractor: "Contractor / vendor / company *", pto: "Person / name *" }[type];
-    let f = field("title", titleLbl, d.title, "text", true, 'required maxlength="120"');
-    if (type === "contractor") f += field("purpose", "Purpose of visit / work", d.purpose, "text", true, 'maxlength="200"');
-    f += field("startDate", "Start date *", d.startDate, "date", false, "required");
-    f += field("endDate", "End date", d.endDate, "date");
-    f += `<div class="hint">For multi-day ${type === "pto" ? "PTO" : type === "event" ? "events" : "visits"}, set an end date. Leave it the same for a single day.</div>`;
-    f += `<label class="check"><input type="checkbox" name="allDay" id="f_allDay" ${d.allDay ? "checked" : ""}/> All day</label>`;
-    f += `<div class="field times">${`<label for="f_startTime">Start time</label><input id="f_startTime" name="startTime" type="time" value="${esc(d.startTime || "")}"/>`}</div>`;
-    f += `<div class="field times">${`<label for="f_endTime">End time</label><input id="f_endTime" name="endTime" type="time" value="${esc(d.endTime || "")}"/>`}</div>`;
-    if (type !== "pto") {
-      f += field("location", type === "contractor" ? "Location / area" : "Location", d.location, "text", false, 'maxlength="120"');
-      f += field("owner", type === "contractor" ? "Nestlé host / contact" : "Host / owner", d.owner, "text", false, 'maxlength="120"');
-      f += `<div class="field full"><label for="f_notes">Short notes</label><textarea id="f_notes" name="notes" maxlength="500">${esc(d.notes || "")}</textarea></div>`;
-    }
-    openModal(head(e ? `Edit ${TYPES[type].label === "PTO / OOO" ? "PTO / OOO" : TYPES[type].label.toLowerCase()}` : `Add ${type === "pto" ? "PTO / OOO" : type}`, `<span class="type-badge ${type}">${TYPES[type].label}</span>`) +
-      `<form id="entryForm" class="form ${type}">${f}</form>
-       <div class="actions"><button class="btn btn-ghost" data-act="${e ? "details" : "back"}" data-id="${e ? e.id : ""}">${e ? "Cancel" : "Back"}</button>
-       <button class="btn btn-primary btn-save" data-act="save" data-type="${type}" data-id="${e ? e.id : ""}">${e ? "Save changes" : "Save"}</button></div>`);
-    const sync = () => document.querySelectorAll(".times").forEach((x) => x.classList.toggle("hidden", $("#f_allDay").checked));
-    $("#f_allDay").addEventListener("change", sync); sync();
-    $("#f_startDate").addEventListener("change", () => { if ($("#f_endDate").value < $("#f_startDate").value) $("#f_endDate").value = $("#f_startDate").value; });
-    setTimeout(() => $("#f_title").focus(), 50);
-  }
-
-  async function save(type, id) {
-    const form = $("#entryForm");
-    if (!form.reportValidity()) return;
-    const fd = Object.fromEntries(new FormData(form).entries());
-    const body = { ...fd, type, allDay: $("#f_allDay").checked };
-    if (body.allDay) { body.startTime = ""; body.endTime = ""; }
-    else if (!body.startTime) { toast("Add a start time or select All day"); return; }
-    if (body.endDate && body.endDate < body.startDate) { toast("End date cannot be before start date"); return; }
-    const btn = document.querySelector(".btn-save"); btn.disabled = true; btn.textContent = "Saving…";
-    try {
-      const { entry } = await api(id ? `/api/entries/${encodeURIComponent(id)}` : "/api/entries", { method: id ? "PUT" : "POST", body: JSON.stringify(body) });
-      state.entries = state.entries.filter((x) => x.id !== entry.id).concat(entry);
-      closeModal(); render(); toast(id ? "Changes saved" : "Added to calendar");
-    } catch (e) { toast(e.message); btn.disabled = false; btn.textContent = "Save"; }
-  }
-
-  function openDetails(id) {
-    const e = state.entries.find((x) => x.id === id); if (!e) return;
-    const rows = [["Date", dateRange(e)], ["Time", timeRange(e)]];
-    if (e.type === "contractor") rows.push(["Purpose", e.purpose]);
-    if (e.type !== "pto") rows.push(["Location", e.location], [e.type === "contractor" ? "Nestlé host" : "Host / owner", e.owner], ["Notes", e.notes]);
-    openModal(head(esc(e.title), `<span class="type-badge ${e.type}">${TYPES[e.type].label}</span>`) +
-      `<dl class="details">${rows.filter((r) => r[1]).map(([a, b]) => `<dt>${a}</dt><dd>${esc(b)}</dd>`).join("")}</dl>
-      <div class="actions"><button class="btn btn-danger" data-act="confirmDelete" data-id="${e.id}">Delete</button>
-      <button class="btn btn-primary" data-act="edit" data-id="${e.id}">Edit</button></div>`);
-  }
-  function confirmDelete(id) {
-    const e = state.entries.find((x) => x.id === id); if (!e) return;
-    openModal(head("Delete this activity?") + `<p style="font-size:1.1em">“<b>${esc(e.title)}</b>” on ${esc(dateRange(e))} will be removed for everyone.</p>
-      <div class="actions"><button class="btn btn-ghost" data-act="details" data-id="${id}">Cancel</button><button class="btn btn-danger" data-act="delete" data-id="${id}">Yes, delete</button></div>`);
-  }
-  async function del(id) {
-    try { await api(`/api/entries/${encodeURIComponent(id)}`, { method: "DELETE" }); state.entries = state.entries.filter((x) => x.id !== id); closeModal(); render(); toast("Deleted"); }
-    catch (e) { toast(e.message); }
-  }
-
-  /* ---------- Events ---------- */
-  document.addEventListener("click", (ev) => {
-    const t = ev.target.closest("[data-act],[data-add],[data-id],[data-day]");
-    if (!t) return;
-    if (t.dataset.add) return openForm(t.dataset.add);
-    const act = t.dataset.act, id = t.dataset.id;
-    if (act === "close") return closeModal();
-    if (act === "back") return openChooser();
-    if (act === "save") return save(t.dataset.type, id || null);
-    if (act === "edit") { const e = state.entries.find((x) => x.id === id); return e && openForm(e.type, e); }
-    if (act === "details") return openDetails(id);
-    if (act === "confirmDelete") return confirmDelete(id);
-    if (act === "delete") return del(id);
-    if (id) { ev.stopPropagation(); return openDetails(id); }
-    if (t.dataset.day) { state.cursor = parse(t.dataset.day); state.view = "day"; render(); }
+  // ---------- Toolbar ----------
+  $("viewSeg").addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-view]"); if (b) setView(b.dataset.view);
   });
-  $("#addBtn").onclick = openChooser;
-  $("#viewSeg").onclick = (e) => { const b = e.target.closest("button"); if (b) { state.view = b.dataset.view; render(); } };
-  $("#filterSeg").onclick = (e) => { const b = e.target.closest("button"); if (b) { state.filter = b.dataset.filter; render(); } };
-  $("#prevBtn").onclick = () => step(-1);
-  $("#nextBtn").onclick = () => step(1);
-  $("#todayBtn").onclick = () => { state.cursor = today(); render(); };
-  $("#summaryToggle").onclick = () => { state.summaryOpen = !state.summaryOpen; $("#summaryBody").classList.toggle("hidden", !state.summaryOpen); $("#summary").classList.toggle("open", state.summaryOpen); };
-  function step(n) {
-    const c = state.cursor;
-    state.cursor = state.view === "month" ? new Date(c.getFullYear(), c.getMonth() + n, 1) : addDays(c, state.view === "week" ? 7 * n : n);
+  function setView(v) {
+    state.view = v;
+    document.querySelectorAll("#viewSeg button").forEach(x => x.classList.toggle("active", x.dataset.view === v));
+    render(); load();
+  }
+  $("filterSeg").addEventListener("click", ev => {
+    const b = ev.target.closest("button[data-filter]"); if (!b) return;
+    state.filter = b.dataset.filter;
+    document.querySelectorAll("#filterSeg button").forEach(x => x.classList.toggle("active", x === b));
     render();
+  });
+  function shift(dir) {
+    const f = state.focus;
+    if (state.view === "month") state.focus = new Date(f.getFullYear(), f.getMonth() + dir, 1);
+    else state.focus = addDays(f, state.view === "week" ? 7 * dir : dir);
+    render(); load();
+  }
+  $("prevBtn").onclick = () => shift(-1);
+  $("nextBtn").onclick = () => shift(1);
+  $("todayBtn").onclick = () => { state.focus = today(); render(); load(); };
+  $("todayToggle").onclick = () => {
+    els.todayBox.classList.toggle("open");
+    localStorage.setItem("bvc_today_open", els.todayBox.classList.contains("open") ? "1" : "0");
+  };
+  $("addBtn").onclick = () => openTypeChooser();
+
+  // Calendar clicks
+  document.addEventListener("click", ev => {
+    const item = ev.target.closest("[data-id]");
+    if (item && !els.modal.contains(item)) { const e = state.entries.find(x => String(x.id) === item.dataset.id); if (e) openDetails(e); return; }
+    const day = ev.target.closest("[data-day]");
+    if (day && els.cal.contains(day)) { state.focus = parse(day.dataset.day); setView("day"); }
+  });
+
+  // ---------- Modal ----------
+  function openModal(html) { els.modalCard.innerHTML = html; els.modal.classList.remove("hidden"); }
+  function closeModal() { els.modal.classList.add("hidden"); els.modalCard.innerHTML = ""; }
+  els.modal.addEventListener("click", ev => { if (ev.target === els.modal) closeModal(); });
+  document.addEventListener("keydown", ev => { if (ev.key === "Escape") closeModal(); });
+
+  function openTypeChooser() {
+    openModal(`<h2>What would you like to add?</h2>
+      <div class="choice-grid">
+        ${Object.entries(TYPES).map(([k, t]) => `<button class="choice ${k}" data-type="${k}"><span class="dot ${k}"></span>${t.add}</button>`).join("")}
+      </div>
+      <div class="actions"><button class="btn btn-light" data-close>Cancel</button></div>`);
+    els.modalCard.querySelectorAll("[data-type]").forEach(b => (b.onclick = () => openForm({ type: b.dataset.type })));
+    els.modalCard.querySelector("[data-close]").onclick = closeModal;
   }
 
-  let toastTimer;
-  function toast(msg) { const t = $("#toast"); t.textContent = msg; t.classList.remove("hidden"); clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.add("hidden"), 2600); }
+  function openForm(entry) {
+    const isNew = !entry.id, t = entry.type;
+    const base = state.view === "month" && state.focus.getMonth() === today().getMonth() ? today() : state.focus;
+    const e = Object.assign({ start_date: ymd(base), end_date: ymd(base), all_day: t === "pto" }, entry);
+    const v = k => esc(e[k] ?? "");
+    const time = k => esc((e[k] || "").slice(0, 5));
 
-  /* ---------- Auto refresh (skips while a form is open) ---------- */
-  setInterval(() => {
-    const k = key(today());
-    if (k !== todayKey) { todayKey = k; state.cursor = today(); }
-    if (!$("#app").classList.contains("hidden") && $("#modal").classList.contains("hidden")) load(true);
-    else renderHeader();
-  }, REFRESH_MS);
-  document.addEventListener("visibilitychange", () => { if (!document.hidden && !$("#app").classList.contains("hidden")) load(true); });
+    const titleField = {
+      event: `<label class="full">Event title *<input name="title" required value="${v("title")}" placeholder="e.g. Pilot Plant Demo"></label>`,
+      contractor: `<label class="full">Contractor / vendor / company *<input name="title" required value="${v("title")}" placeholder="e.g. ABC Electric"></label>
+                   <label class="full">Purpose of visit / work<input name="purpose" value="${v("purpose")}" placeholder="e.g. Panel upgrade"></label>`,
+      pto: `<label class="full">Person / name *<input name="title" required value="${v("title")}" placeholder="e.g. Dina"></label>`
+    }[t];
+    const dates = `<label>Start date *<input type="date" name="start_date" required value="${v("start_date")}"></label>
+      <label>End date<input type="date" name="end_date" value="${v("end_date")}"><span class="hint">Same as start for a single day</span></label>`;
+    const allDay = `<label class="check full"><input type="checkbox" name="all_day" ${e.all_day ? "checked" : ""}> All day</label>`;
+    const times = `<label class="tf">Start time<input type="time" name="start_time" value="${time("start_time")}"></label>
+      <label class="tf">End time<input type="time" name="end_time" value="${time("end_time")}"></label>`;
+    const extra = t === "pto" ? "" : `
+      <label class="full">${t === "event" ? "Location" : "Location / area"}<input name="location" value="${v("location")}"></label>
+      <label class="full">${t === "event" ? "Host / owner" : "Nestlé host / contact"}<input name="host" value="${v("host")}"></label>
+      <label class="full">Short notes<textarea name="notes" maxlength="500">${v("notes")}</textarea></label>`;
 
-  /* ---------- Start ---------- */
-  fetch("/api/session", { credentials: "same-origin" })
-    .then((r) => (r.ok ? showApp() : showAccess()))
-    .catch(showAccess);
+    openModal(`<span class="type-badge ${t}"><span class="dot ${t}"></span>${TYPES[t].label}</span>
+      <h2>${isNew ? TYPES[t].add : "Edit " + TYPES[t].label.toLowerCase()}</h2>
+      <form class="form" id="entryForm">${titleField}${dates}${allDay}${times}${extra}
+        <div class="error full" id="formError"></div>
+        <div class="actions full">
+          ${isNew ? '<button type="button" class="btn btn-light left" data-back>‹ Back</button>' : ""}
+          <button type="button" class="btn btn-light" data-close>Cancel</button>
+          <button type="submit" class="btn btn-primary">${isNew ? "Save" : "Save changes"}</button>
+        </div></form>`);
+
+    const form = $("entryForm"), f = form.elements;
+    const toggleTimes = () => form.querySelectorAll(".tf").forEach(x => x.classList.toggle("hidden", f.all_day.checked));
+    f.all_day.onchange = toggleTimes; toggleTimes();
+    f.start_date.addEventListener("change", () => { if (!f.end_date.value || f.end_date.value < f.start_date.value) f.end_date.value = f.start_date.value; });
+    form.querySelector("[data-close]").onclick = closeModal;
+    const back = form.querySelector("[data-back]"); if (back) back.onclick = openTypeChooser;
+    setTimeout(() => f.title.focus(), 50);
+
+    form.onsubmit = async ev => {
+      ev.preventDefault();
+      const err = $("formError"); err.textContent = "";
+      const val = n => (f[n] ? f[n].value : "");
+      const out = {
+        id: e.id || "", type: t, title: val("title").trim(), purpose: val("purpose"),
+        start_date: val("start_date"), end_date: val("end_date") || val("start_date"),
+        all_day: f.all_day.checked,
+        start_time: f.all_day.checked ? "" : val("start_time"),
+        end_time: f.all_day.checked ? "" : val("end_time"),
+        location: val("location"), host: val("host"), notes: val("notes")
+      };
+      if (!out.title) return (err.textContent = "Please enter a name/title.");
+      if (out.end_date < out.start_date) return (err.textContent = "End date can't be before the start date.");
+      if (!out.all_day && t !== "pto" && !out.start_time) return (err.textContent = "Add a start time or select All day.");
+      if (out.start_time && out.end_time && out.end_time <= out.start_time) return (err.textContent = "End time must be after start time.");
+      if (t === "pto" && !out.start_time) out.all_day = true;
+      const btn = form.querySelector("[type=submit]"); btn.disabled = true; btn.textContent = "Saving…";
+      try {
+        const saved = await API.save(out);
+        closeModal();
+        if (saved && saved.start_date && state.view !== "month") state.focus = parse(saved.start_date);
+        await load();
+      } catch (x) { handleError(x); err.textContent = "Could not save. Please try again."; btn.disabled = false; btn.textContent = "Save"; }
+    };
+  }
+
+  function openDetails(e) {
+    const rows = [];
+    const add = (k, val) => { if (val) rows.push(`<dt>${k}</dt><dd>${esc(val)}</dd>`); };
+    if (e.type === "contractor") { add("Company", e.title); add("Purpose", e.purpose); }
+    else if (e.type === "pto") add("Person", e.title);
+    else add("Event", e.title);
+    add(e.start_date === e.end_date ? "Date" : "Dates", dateRangeText(e));
+    add("Time", timeText(e));
+    if (e.type !== "pto") {
+      add("Location", e.location);
+      add(e.type === "event" ? "Host / owner" : "Nestlé host", e.host);
+      add("Notes", e.notes);
+    }
+    openModal(`<span class="type-badge ${e.type}"><span class="dot ${e.type}"></span>${TYPES[e.type].label}</span>
+      <h2>${esc(displayTitle(e))}</h2>
+      <dl class="detail-list">${rows.join("")}</dl>
+      <div class="actions">
+        <button class="btn btn-danger left" data-del>Delete</button>
+        <button class="btn btn-light" data-close>Close</button>
+        <button class="btn btn-primary" data-edit>Edit</button>
+      </div>`);
+    els.modalCard.querySelector("[data-close]").onclick = closeModal;
+    els.modalCard.querySelector("[data-edit]").onclick = () => openForm(e);
+    els.modalCard.querySelector("[data-del]").onclick = () =>
+      confirmBox("Delete this activity?", `"${displayTitle(e)}" will be removed for everyone.`, "Delete", async () => {
+        try { await API.remove(e.id); closeModal(); await load(); } catch (x) { handleError(x); }
+      }, () => openDetails(e));
+  }
+
+  function confirmBox(title, msg, okText, onOk, onCancel) {
+    openModal(`<h2>${esc(title)}</h2><p>${esc(msg)}</p>
+      <div class="actions"><button class="btn btn-light" data-no>Cancel</button><button class="btn btn-danger" data-yes>${esc(okText)}</button></div>`);
+    els.modalCard.querySelector("[data-no]").onclick = () => (onCancel ? onCancel() : closeModal());
+    els.modalCard.querySelector("[data-yes]").onclick = async ev => { ev.target.disabled = true; await onOk(); };
+  }
+
+  boot();
 })();

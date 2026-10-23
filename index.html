@@ -1,87 +1,71 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>Bridgewater Site Visibility Calendar</title>
-<link rel="preconnect" href="https://fonts.googleapis.com" />
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
-<link rel="stylesheet" href="styles.css" />
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bridgewater PTC · Site Visibility Calendar</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-
-<!-- ACCESS SCREEN -->
-<section id="access" class="access hidden">
-  <form id="accessForm" class="access-card">
-    <div class="brand-mark">BW</div>
-    <div class="eyebrow">BRIDGEWATER PTC</div>
-    <h1>Site Visibility Calendar</h1>
-    <p class="muted">Enter the site passkey to continue</p>
-    <input id="passkey" type="password" autocomplete="current-password" placeholder="Passkey" required />
-    <div id="accessError" class="error"></div>
-    <button type="submit" class="btn btn-primary btn-lg">Enter</button>
-  </form>
-</section>
-
-<!-- APP -->
-<div id="app" class="hidden">
-  <header class="header">
-    <div class="brand">
-      <div class="brand-mark">BW</div>
-      <div>
-        <div class="eyebrow">BRIDGEWATER PTC</div>
-        <h1>Site Visibility Calendar</h1>
-        <div class="subtitle">Events • Contractors • PTO / OOO</div>
+  <!-- APP -->
+  <div id="app" class="app">
+    <header class="header">
+      <div class="brand">
+        <div class="brand-mark">B</div>
+        <div>
+          <div class="eyebrow">BRIDGEWATER PTC</div>
+          <div class="title">Site Visibility Calendar</div>
+          <div class="subtitle">Events • Contractors • PTO / OOO</div>
+        </div>
       </div>
-    </div>
-    <div class="header-right">
-      <div class="today-date">
-        <div id="hdrDay"></div>
-        <div id="hdrDate"></div>
+      <div class="header-right">
+        <div class="now">
+          <div id="nowDate" class="now-date"></div>
+          <div id="nowTime" class="now-time"></div>
+        </div>
+        <button id="addBtn" class="btn btn-add">＋ ADD</button>
       </div>
-      <button id="addBtn" class="btn btn-add">＋ ADD</button>
-    </div>
-  </header>
+    </header>
 
-  <div class="toolbar">
-    <div class="seg" id="viewSeg">
-      <button data-view="month" class="active">MONTH</button>
-      <button data-view="week">WEEK</button>
-      <button data-view="day">DAY</button>
-    </div>
-    <div class="nav">
-      <button id="prevBtn" class="btn btn-icon" aria-label="Previous">‹</button>
-      <div id="rangeLabel" class="range-label"></div>
-      <button id="nextBtn" class="btn btn-icon" aria-label="Next">›</button>
-      <button id="todayBtn" class="btn btn-ghost">Today</button>
-    </div>
-    <div class="seg filters" id="filterSeg">
-      <button data-filter="all" class="active">ALL</button>
-      <button data-filter="event"><span class="dot event"></span>EVENTS</button>
-      <button data-filter="contractor"><span class="dot contractor"></span>CONTRACTORS</button>
-      <button data-filter="pto"><span class="dot pto"></span>PTO / OOO</button>
-    </div>
+
+    <nav class="toolbar">
+      <div class="seg" id="viewSeg">
+        <button data-view="month" class="active">MONTH</button>
+        <button data-view="week">WEEK</button>
+        <button data-view="day">DAY</button>
+      </div>
+      <div class="seg filters" id="filterSeg">
+        <button data-filter="all" class="active">ALL</button>
+        <button data-filter="event"><span class="dot event"></span>EVENTS</button>
+        <button data-filter="contractor"><span class="dot contractor"></span>CONTRACTORS</button>
+        <button data-filter="pto"><span class="dot pto"></span>PTO / OOO</button>
+      </div>
+      <div class="nav">
+        <button id="prevBtn" class="btn btn-icon" aria-label="Previous">‹</button>
+        <button id="todayBtn" class="btn btn-outline">Today</button>
+        <button id="nextBtn" class="btn btn-icon" aria-label="Next">›</button>
+        <div id="periodLabel" class="period"></div>
+      </div>
+    </nav>
+
+    <section class="today" id="todayBox">
+      <button class="today-toggle" id="todayToggle">
+        <span>TODAY</span><span id="todayCounts" class="today-counts"></span><span class="chev">▾</span>
+      </button>
+      <div class="today-body" id="todayBody"></div>
+    </section>
+
+    <main id="calendar" class="calendar"></main>
+    <div id="status" class="status"></div>
   </div>
 
-  <section class="summary" id="summary">
-    <button class="summary-toggle" id="summaryToggle">
-      <span class="summary-title">TODAY</span>
-      <span class="summary-counts" id="summaryCounts"></span>
-      <span class="chev" id="summaryChev">▾</span>
-    </button>
-    <div class="summary-body hidden" id="summaryBody"></div>
-  </section>
+  <!-- MODAL -->
+  <div id="modal" class="modal hidden">
+    <div class="modal-card" id="modalCard"></div>
+  </div>
 
-  <main id="calendar" class="calendar"></main>
-  <div class="footer-note" id="syncNote"></div>
-</div>
-
-<!-- MODAL -->
-<div id="modal" class="modal hidden" role="dialog" aria-modal="true">
-  <div class="modal-card" id="modalCard"></div>
-</div>
-
-<div id="toast" class="toast hidden"></div>
-<script src="app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
